@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+dash
+dash-bootstrap-components
+plotly
+alembic
+python-dotenv
+
