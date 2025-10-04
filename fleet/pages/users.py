@@ -35,7 +35,7 @@ layout = html.Div(
             [
                 html.Label("ชื่อ นามสกุล *", className="mr-2"),
                 dcc.Input(id="inp-fullname", type="text", placeholder="เช่น สมชาย ใจดี",
-                          style={"width": "240px", "marginRight": "8px"}),
+                          style={"width": "240px", "marginLeft": "8px","marginRight": "8 px"}),
 
                 html.Label("ตำแหน่ง", className="mr-2"),
                 dcc.Input(id="inp-position", type="text", placeholder="เช่น พนักงานขับรถ",
@@ -43,7 +43,7 @@ layout = html.Div(
 
                 html.Label("หน่วยงาน", className="mr-2"),
                 dcc.Dropdown(id="inp-org", options=ORG_OPTIONS, placeholder="เลือกหน่วยงาน",
-                             clearable=True, style={"width": "200px", "display": "inline-block", "marginRight": "8px"}),
+                             clearable=True, style={"width": "200px", "display": "inline-block", "marginLeft": "8px","marginRight": "16px"}),
 
                 html.Button("➕ เพิ่มผู้ใช้งาน", id="btn-add", n_clicks=0),
                 dcc.Checklist(id="chk-del", options=[{"label":"โหมดลบ","value":"on"}], value=[],
@@ -66,6 +66,7 @@ layout = html.Div(
             editable=True,
             row_deletable=False,  # toggle ด้วย chk-del
             dropdown={"org": {"options": ORG_OPTIONS}},
+            fill_width=True,
             filter_action="native",
             sort_action="native",
             page_action="native",
@@ -73,7 +74,7 @@ layout = html.Div(
             page_size=10,
             style_cell={"fontSize":"14px","padding":"6px","whiteSpace":"normal","height":"auto"},
             style_cell_conditional=[
-                {"if":{"column_id":"id"}, "width":"60px","maxWidth":"60px","minWidth":"60px","textAlign":"center"},
+                {"if":{"column_id":"id"}, "width":"50px","maxWidth":"50px","minWidth":"50px","textAlign":"center"},
                 {"if":{"column_id":"full_name"},"width":"30%"},
                 {"if":{"column_id":"position"},"width":"22%"},
                 {"if":{"column_id":"org"},"width":"18%"},
