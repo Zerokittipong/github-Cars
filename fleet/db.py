@@ -108,6 +108,60 @@ def init_usage_logs_table():
         add_missing("is_maintenance",   "is_maintenance INTEGER DEFAULT 0")
         add_missing("planned_end_time", "planned_end_time DATETIME")
 
+def init_maintenance_tables():
+    with engine.begin() as conn:
+        # Header table
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS maintenance_orders (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                car_id        INTEGER NOT NULL,
+                repair_date   TEXT,        -- YYYY-MM-DD
+                accept_date   TEXT,        -- YYYY-MM-DD
+                committee     TEXT,        -- เก็บชื่อหลายคนคั่นด้วย , หรือจะเก็บ id ก็ได้
+                center_name   TEXT,
+                note          TEXT,
+                total_qty     INTEGER DEFAULT 0,
+                subtotal      REAL    DEFAULT 0.0,
+                vat           REAL    DEFAULT 0.0,
+                grand_total   REAL    DEFAULT 0.0,
+                pdf_path      TEXT,
+                FOREIGN KEY(car_id) REFERENCES cars(id)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_maint_orders_id ON maintenance_orders (id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_maint_orders_car ON maintenance_orders (car_id)"))
+
+        # Items table
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS maintenance_items (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id    INTEGER NOT NULL,
+                item_no     INTEGER,
+                description TEXT,
+                qty         INTEGER DEFAULT 1,
+                unit_price  REAL    DEFAULT 0.0,
+                amount      REAL    DEFAULT 0.0,
+                FOREIGN KEY(order_id) REFERENCES maintenance_orders(id)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_maint_items_order ON maintenance_items (order_id)"))
+
+        # (กันพลาด schema เก่า) เติมคอลัมน์ที่หายไป
+        def ensure_cols(table, pairs):
+            cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
+            for name, ddl in pairs:
+                if name not in cols:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+        ensure_cols("maintenance_orders", [
+            ("note",        "note TEXT"),
+            ("pdf_path",    "pdf_path TEXT"),
+            ("total_qty",   "total_qty INTEGER DEFAULT 0"),
+            ("subtotal",    "subtotal REAL DEFAULT 0.0"),
+            ("vat",         "vat REAL DEFAULT 0.0"),
+            ("grand_total", "grand_total REAL DEFAULT 0.0"),
+        ])
+
 def init_db():
     # ถ้ามี ORM models อื่น ๆ ก็ import เพื่อ create_all ได้ แต่ไม่บังคับ
     try:
@@ -119,7 +173,12 @@ def init_db():
     init_users_table()
     init_cars_table()
     init_usage_logs_table()
+    init_maintenance_tables()
+
+
+
 
 if __name__ == "__main__":
     init_db()
     print("✅ Database initialized")
+
