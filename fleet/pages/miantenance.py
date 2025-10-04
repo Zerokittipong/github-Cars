@@ -61,6 +61,7 @@ layout = html.Div(
         
         dcc.Download(id="maint-export"),
         dcc.Download(id="maint-pdf-download"),
+        dcc.Download(id="maint-items-export"),
 
         html.Div(
             [
@@ -152,6 +153,7 @@ layout = html.Div(
         html.Div(
             [
                 html.Button("➕ เพิ่มรายการ", id="btn-add-item", style={"marginRight":"6px"}),
+                html.Button("Export รายการ (CSV)", id="btn-export-items", style={"marginRight":"10px"}),
                 html.Div(id="totals-box", style={"display":"inline-block","marginLeft":"12px","fontWeight":"600"}),
                 html.Span(id="msg_items", style={"marginLeft":"10px","color":"#2b6"}),
             ],
@@ -471,3 +473,44 @@ def clear_search(n, orders_full):
         return no_update, no_update
     return "", (orders_full or [])
     
+
+@callback(
+    Output("maint-items-export", "data"),
+    Input("btn-export-items", "n_clicks"),
+    State("maint-items-store", "data"),
+    State("maint-current-order-id", "data"),
+    prevent_initial_call=True
+)
+def export_items_csv(n, rows, order_id):
+    
+
+    # ไม่มีข้อมูลก็ไม่ทำอะไร
+    if not n or rows is None:
+        return dash.no_update
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return dash.no_update
+
+    # จัดลำดับคอลัมน์ให้อ่านง่าย
+    cols = ["item_no", "description", "qty", "unit_price", "amount"]
+    df = df.reindex(columns=[c for c in cols if c in df.columns])
+
+    # ตั้งชื่อไฟล์ให้รู้ว่าเป็นของใบงานไหน
+    filename = "maintenance_items.csv"
+    if order_id:
+        # ลองหาทะเบียนเพื่อใส่ในชื่อไฟล์ (ถ้าเจอ)
+        with db_engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT c.plate
+                FROM maintenance_orders o
+                JOIN cars c ON c.id = o.car_id
+                WHERE o.id = :i
+            """), {"i": int(order_id)}).first()
+        plate = (row[0] if row else "").replace(" ", "_")
+        filename = f"maint_{plate or 'order'}_{order_id}_items.csv"
+
+    # ส่งออก CSV (UTF-8 SIG เพื่อให้ Excel เปิดแล้วภาษาไทยไม่เพี้ยน)
+    return dcc.send_data_frame(
+        df.to_csv, filename, index=False, encoding="utf-8-sig", lineterminator="\r\n"
+    )
