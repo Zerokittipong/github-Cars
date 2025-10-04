@@ -10,6 +10,9 @@ DEFAULT_SQLITE = PROJECT_DIR / "fleet.db"
 DATABASE_URL = os.getenv("FLEET_DB_URL", f"sqlite:///{DEFAULT_SQLITE.as_posix()}")
 print(f"[DB] Using -> {DATABASE_URL}")
 
+UPLOAD_DIR = (Path(__file__).resolve().parent / "uploads" / "cars")
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 engine = create_engine(DATABASE_URL, echo=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
@@ -41,8 +44,15 @@ def init_cars_table():
                 brand  TEXT,
                 color  TEXT,
                 year   INTEGER,
-                mileage INTEGER DEFAULT 0,
-                status  TEXT DEFAULT 'available'
+                status  TEXT DEFAULT 'available',      -- available/in_use/maintenance/lost
+                asset_number   TEXT,
+                vehicle_type   TEXT,                  -- รย.1 / รย.2 / รย.3
+                description    TEXT,
+                chassis_number TEXT,
+                engine_number  TEXT,
+                pdf_path       TEXT,
+                car_condition  TEXT DEFAULT 'ปกติ', 
+                caretaker_org  TEXT
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_cars_id ON cars (id)"))
@@ -57,8 +67,15 @@ def init_cars_table():
         add_missing("model",   "model TEXT")
         add_missing("color",   "color TEXT")
         add_missing("year",    "year INTEGER")
-        add_missing("mileage", "mileage INTEGER DEFAULT 0")
         add_missing("status",  "status TEXT DEFAULT 'available'")
+        add_missing("asset_number",   "asset_number TEXT")
+        add_missing("vehicle_type",   "vehicle_type TEXT")
+        add_missing("description",    "description TEXT")
+        add_missing("chassis_number", "chassis_number TEXT")
+        add_missing("engine_number",  "engine_number TEXT")
+        add_missing("pdf_path",       "pdf_path TEXT")
+        add_missing("car_condition", "car_condition TEXT DEFAULT 'ปกติ'")
+        add_missing("caretaker_org", "caretaker_org TEXT")
 
         # ให้แถวเก่าที่ status ยังว่าง เป็น 'available'
         conn.execute(text("UPDATE cars SET status='available' WHERE status IS NULL"))

@@ -48,7 +48,7 @@ layout = html.Div(
                 html.Button("➕ เพิ่มผู้ใช้งาน", id="btn-add", n_clicks=0),
                 dcc.Checklist(id="chk-del", options=[{"label":"โหมดลบ","value":"on"}], value=[],
                               style={"display":"inline-block","marginLeft":"12px"}),
-                html.Div(id="msg", style={"color":"crimson","marginTop":"6px"}),
+                html.Div(id="msg_users", style={"color":"crimson","marginTop":"6px"}),
             ],
             style={"marginBottom":"10px"},
         ),
@@ -106,7 +106,7 @@ def toggle_delete_mode(v):
 @callback(
     Output("tbl-users", "data", allow_duplicate=True),
     Output("user-store", "data", allow_duplicate=True),
-    Output("msg", "children"),
+    Output("msg_users", "children"),
     Input("btn-add", "n_clicks"),
     State("inp-fullname", "value"),
     State("inp-position", "value"),
