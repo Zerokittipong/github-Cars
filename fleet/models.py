@@ -2,7 +2,7 @@
 from __future__ import annotations
 from sqlalchemy import (
     create_engine, Column, Integer, String, DateTime,
-    ForeignKey, CheckConstraint, Text
+    ForeignKey, CheckConstraint, Text, Boolean
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 import os
@@ -51,7 +51,11 @@ class UsageLog(Base):
     car_id = Column(Integer, ForeignKey("cars.id"))
     borrower_id = Column(Integer, ForeignKey("users.id"))
     start_time = Column(DateTime)      # เวลาเริ่มใช้จริง
-    end_time = Column(DateTime)        # กำหนดวันคืน (ตามแผน)
+    
+
+    planned_end_time = Column(DateTime, nullable=True)
+    is_maintenance   = Column(Boolean, default=False)
+    returned_at      = Column(DateTime, nullable=True)   # เวลาคืนจริง (ตอนกดคืนรถ)
     purpose = Column(String)
     returned_at = Column(DateTime, nullable=True)  # เวลาคืนจริง
 

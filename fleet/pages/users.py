@@ -1,101 +1,175 @@
-# fleet/pages/users.py
+# pages/users.py
+from dash import html, dcc, dash_table, callback, Input, Output, State
 import dash
-from dash import html, dcc, dash_table, Input, Output, State, callback, ctx
 import pandas as pd
-from fleet.db import SessionLocal
-from fleet.models import User
+from sqlalchemy import text
+from fleet.db import engine, SessionLocal, init_users_table
+
 
 dash.register_page(__name__, path="/users", name="Users")
 
-def load_users_df() -> pd.DataFrame:
-    with SessionLocal() as s:
-        rows = s.query(User).order_by(User.id.asc()).all()
-        data = [{"id": r.id, "full_name": r.full_name} for r in rows]
-    return pd.DataFrame(data)
 
-def insert_user(full_name: str) -> str:
-    full_name = (full_name or "").strip()
-    if not full_name:
-        return "❌ กรุณากรอกชื่อผู้ใช้งาน"
-    with SessionLocal() as s:
-        existed = s.query(User).filter(User.full_name == full_name).first()
-        if existed:
-            return f"⚠️ '{full_name}' มีอยู่แล้ว (id={existed.id})"
-        s.add(User(full_name=full_name))
-        s.commit()
-    return f"✅ เพิ่มผู้ใช้งาน '{full_name}' สำเร็จ"
+# สร้างตาราง/คอลัมน์ที่ต้องใช้ (ครั้งเดียว)
+init_users_table()
 
-def layout():
-    df = load_users_df()
-    return html.Div([
-        html.H2("Users"),
-        html.Div([
-            html.Label("ชื่อผู้ใช้งาน *"),
-            dcc.Input(id="user-fullname", type="text", placeholder="เช่น สมชาย ใจดี", style={"width": "260px"}),
-            html.Button("➕ เพิ่มผู้ใช้งาน", id="btn-add-user", style={"marginLeft": "8px"}),
-            html.Span(id="user-msg", style={"marginLeft": "12px"})
-        ], style={"marginBottom": "10px"}),
-        dash_table.DataTable(
-            id="users-table",
-            data=(df.to_dict("records") if not df.empty else []),
-            columns=[{"name": c, "id": c} for c in (df.columns if not df.empty else ["id","full_name"])],
-            page_size=10, sort_action="native", filter_action="native",
-            style_table={"overflowX": "auto"},
+ORG_OPTIONS = [
+    {"label": "สสป ที่ 1", "value": "สสป ที่ 1"},
+    {"label": "สสป ที่ 2", "value": "สสป ที่ 2"},
+    {"label": "สสป ที่ 3", "value": "สสป ที่ 3"},
+    {"label": "สสป ที่ 4", "value": "สสป ที่ 4"},
+    {"label": "สบท",     "value": "สบท"},
+]
+
+def fetch_users_df():
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, full_name, position, org FROM users ORDER BY id ASC")).mappings().all()
+        return pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id","full_name","position","org"])
+
+layout = html.Div(
+    [
+        html.H1("Users"),
+        dcc.Store(id="user-store"),  # เก็บ snapshot ล่าสุดสำหรับทำ diff
+
+        # -------- แถบเพิ่มผู้ใช้งาน --------
+        html.Div(
+            [
+                html.Label("ชื่อ นามสกุล *", className="mr-2"),
+                dcc.Input(id="inp-fullname", type="text", placeholder="เช่น สมชาย ใจดี",
+                          style={"width": "240px", "marginRight": "8px"}),
+
+                html.Label("ตำแหน่ง", className="mr-2"),
+                dcc.Input(id="inp-position", type="text", placeholder="เช่น พนักงานขับรถ",
+                          style={"width": "200px", "marginRight": "8px"}),
+
+                html.Label("หน่วยงาน", className="mr-2"),
+                dcc.Dropdown(id="inp-org", options=ORG_OPTIONS, placeholder="เลือกหน่วยงาน",
+                             clearable=True, style={"width": "200px", "display": "inline-block", "marginRight": "8px"}),
+
+                html.Button("➕ เพิ่มผู้ใช้งาน", id="btn-add", n_clicks=0),
+                dcc.Checklist(id="chk-del", options=[{"label":"โหมดลบ","value":"on"}], value=[],
+                              style={"display":"inline-block","marginLeft":"12px"}),
+                html.Div(id="msg", style={"color":"crimson","marginTop":"6px"}),
+            ],
+            style={"marginBottom":"10px"},
         ),
-    ])
 
-@callback(
-    Output("users-table", "data"),
-    Output("user-msg", "children"),
-    Output("user-fullname", "value"),
-    Input("btn-add-user", "n_clicks"),
-    State("user-fullname", "value"),
-    prevent_initial_call=True
+        # -------- ตาราง --------
+        dash_table.DataTable(
+            id="tbl-users",
+            columns=[
+                {"name": "ID", "id": "id", "type": "numeric", "editable": False},
+                {"name": "ชื่อ นามสกุล", "id": "full_name", "type": "text", "editable": True},
+                {"name": "ตำแหน่ง", "id": "position", "type": "text", "editable": True},
+                {"name": "หน่วยงาน", "id": "org", "presentation": "dropdown"},
+            ],
+            data=[],  # จะใส่ผ่าน callback
+            editable=True,
+            row_deletable=False,  # toggle ด้วย chk-del
+            dropdown={"org": {"options": ORG_OPTIONS}},
+            filter_action="native",
+            sort_action="native",
+            page_action="native",
+            page_current=0,
+            page_size=10,
+            style_cell={"fontSize":"14px","padding":"6px","whiteSpace":"normal","height":"auto"},
+            style_cell_conditional=[
+                {"if":{"column_id":"id"}, "width":"60px","maxWidth":"60px","minWidth":"60px","textAlign":"center"},
+                {"if":{"column_id":"full_name"},"width":"30%"},
+                {"if":{"column_id":"position"},"width":"22%"},
+                {"if":{"column_id":"org"},"width":"18%"},
+            ],
+            style_header={"backgroundColor":"#f8f6ff","fontWeight":"bold"},
+        ),
+    ]
 )
-def add_user(n, full_name):
-    if not n or ctx.triggered_id != "btn-add-user":
-        raise dash.exceptions.PreventUpdate
-    msg = insert_user(full_name)
-    df = load_users_df()
-    data = df.to_dict("records") if not df.empty else []
-    if msg.startswith("✅"):
-        return data, msg, ""
-    return data, msg, dash.no_update
-    
+
+# -------- โหลดข้อมูลครั้งแรก -> table + store --------
 @callback(
-    Output("usg-msg", "children", allow_duplicate=True),
-    Output("usage-table", "data", allow_duplicate=True),
-    Output("usg-car", "options", allow_duplicate=True),
-    Output("return-section", "style"),
-    Output("return-usage-id", "data"),
-    Output("ret-date", "date"),
-    Output("ret-hh", "value"),
-    Output("ret-mm", "value"),
-    Input("btn-return-confirm", "n_clicks"),
-    State("return-usage-id", "data"),
-    State("ret-date", "date"),
-    State("ret-hh", "value"),
-    State("ret-mm", "value"),
-    State("usg-open-only", "value"),
-    prevent_initial_call=True
+    Output("tbl-users", "data"),
+    Output("user-store", "data"),
+    Input("tbl-users", "id"),   # ทริกเกอร์ตอนเพจ mount
+    prevent_initial_call=False,
 )
-def on_confirm_return(n, usage_id, date_str, hh, mm, open_only_values):
+def load_users(_):
+    df = fetch_users_df()
+    return df.to_dict("records"), df.to_dict("records")
+
+# -------- toggle โหมดลบ --------
+@callback(
+    Output("tbl-users", "row_deletable"),
+    Input("chk-del", "value"),
+)
+def toggle_delete_mode(v):
+    return "on" in (v or [])
+
+# -------- เพิ่มผู้ใช้ใหม่ (INSERT) --------
+@callback(
+    Output("tbl-users", "data", allow_duplicate=True),
+    Output("user-store", "data", allow_duplicate=True),
+    Output("msg", "children"),
+    Input("btn-add", "n_clicks"),
+    State("inp-fullname", "value"),
+    State("inp-position", "value"),
+    State("inp-org", "value"),
+    prevent_initial_call=True,
+)
+def add_user(n, full_name, position, org):
     if not n:
         raise dash.exceptions.PreventUpdate
-    if not usage_id or not date_str or hh is None or mm is None:
-        return ("❌ โปรดระบุวัน/เวลาให้ครบ", dash.no_update, dash.no_update,
-                {"display": "block"}, dash.no_update, dash.no_update, dash.no_update, dash.no_update)
+    if not (full_name and str(full_name).strip()):
+        return dash.no_update, dash.no_update, "กรุณากรอก ‘ชื่อ นามสกุล’"
 
-    end_iso = to_iso_from_date_hh_mm(date_str, hh, mm)
-    msg = return_car_at(usage_id, end_iso)
+    with engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO users (full_name, position, org) VALUES (:fn, :pos, :org)"),
+            {"fn": full_name.strip(), "pos": (position or "").strip(), "org": org or ""}
+        )
 
-    # รีโหลดตาราง + รายการรภว่าง
-    df_full = load_usage_df()
-    df = df_full if "open" not in (open_only_values or []) else df_full[df_full["status"] == "in_use"]
-    options = load_car_options(only_available=True)
+    df = fetch_users_df()
+    return df.to_dict("records"), df.to_dict("records"), ""
 
-    # เคลียร์และซ่อนฟอร์ม
-    return (msg,
-            (df.to_dict("records") if not df.empty else []),
-            options,
-            {"display": "none"}, None, None, None, None)
+# -------- Persist การแก้ไข/ลบจาก DataTable -> DB (UPSERT+DELETE แบบ diff) --------
+@callback(
+    Output("tbl-users", "data", allow_duplicate=True),
+    Output("user-store", "data", allow_duplicate=True),
+    Input("tbl-users", "data"),
+    State("user-store", "data"),
+    prevent_initial_call=True,
+)
+def persist_changes(new_rows, old_rows):
+    # new_rows: หลังผู้ใช้แก้ไข/ลบบนตาราง
+    new_df = pd.DataFrame(new_rows or [])
+    old_df = pd.DataFrame(old_rows or [])
+
+    new_ids = set(new_df["id"].astype(int)) if not new_df.empty else set()
+    old_ids = set(old_df["id"].astype(int)) if not old_df.empty else set()
+
+    deleted_ids = old_ids - new_ids
+    kept_ids    = new_ids & old_ids
+
+    with engine.begin() as conn:
+        # ลบแถวที่หายไป
+        if deleted_ids:
+            conn.execute(text(f"DELETE FROM users WHERE id IN ({','.join([':id'+str(i) for i,_ in enumerate(deleted_ids)])})"),
+                         {('id'+str(i)): v for i, v in enumerate(deleted_ids)})
+
+        # อัปเดตแถวที่แก้ไข
+        if kept_ids:
+            new_map = {int(r["id"]): r for r in new_rows}
+            old_map = {int(r["id"]): r for r in old_rows}
+            for _id in kept_ids:
+                n, o = new_map[_id], old_map[_id]
+                if (n.get("full_name") != o.get("full_name")) or (n.get("position") != o.get("position")) or (n.get("org") != o.get("org")):
+                    conn.execute(
+                        text("""UPDATE users
+                                SET full_name = :fn, position = :pos, org = :org
+                                WHERE id = :id"""),
+                        {"fn": (n.get("full_name") or "").strip(),
+                         "pos": (n.get("position") or "").strip(),
+                         "org": n.get("org") or "",
+                         "id": int(_id)}
+                    )
+
+    # รีโหลดจาก DB ให้แน่ใจว่า data ตรง
+    df = fetch_users_df()
+    return df.to_dict("records"), df.to_dict("records")

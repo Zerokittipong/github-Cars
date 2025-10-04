@@ -1,14 +1,12 @@
 # fleet/app.py
 import dash
 from dash import html, dcc
+from .db import init_db
 
 
+init_db()
 
-app = dash.Dash(
-    __name__,
-    use_pages=True,
-    suppress_callback_exceptions=True,   # << สำคัญ
-)
+app = dash.Dash(__name__,use_pages=True, suppress_callback_exceptions=True)
 
 app.layout = html.Div([
     html.H1("Fleet Management"),

@@ -27,40 +27,20 @@ def ensure_is_maintenance_column():
         if "is_maintenance" not in cols:
             conn.execute(text("ALTER TABLE usage_logs ADD COLUMN is_maintenance INTEGER DEFAULT 0"))
             conn.commit()
+            
+def ensure_planned_end_column():
+    with engine.connect() as conn:
+        cols = [r[1] for r in conn.execute(text("PRAGMA table_info(usage_logs)")).fetchall()]
+        if "planned_end_time" not in cols:
+            conn.execute(text("ALTER TABLE usage_logs ADD COLUMN planned_end_time DATETIME"))
+            conn.commit()
 
-def load_usage_df() -> pd.DataFrame:
-    ensure_returned_at_column()
-    ensure_is_maintenance_column()
-    with SessionLocal() as s:
-        logs = s.query(UsageLog).order_by(UsageLog.id.desc()).all()
-        rows, now = [], datetime.now()
-        for r in logs:
-            if r.returned_at is not None:
-                status = "returned"
-            elif getattr(r, "is_maintenance", 0) in (1, True):
-                status = "maintenance"          # <<<< ใหม่
-            elif r.end_time and now > r.end_time:
-                status = "overdue"
-            else:
-                status = "in_use"
-            rows.append({
-                "id": r.id,
-                "plate": r.car.plate if r.car else None,
-                "borrower": r.borrower.full_name if r.borrower else None,
-                "start_time": r.start_time,
-                "planned_return": r.end_time,
-                "returned_at": r.returned_at,
-                "purpose": r.purpose,
-                "is_maintenance": int(getattr(r, "is_maintenance", 0)),
-                "status": status,
-            })
-    return pd.DataFrame(rows)
-
+            
 def open_usage_options():
     df = load_usage_df()
     if df.empty:
         return []
-    df = df[df["status"].isin(["in_use", "overdue"])]
+    df = df[df["status"].isin(["in_use", "overdue","maintenance"])]
     opts = []
     for _, r in df.iterrows():
         label = f'#{r["id"]} | {r["plate"]} | {r["borrower"]} | เริ่ม {r["start_time"]}'
@@ -96,63 +76,151 @@ def _filter_status(df: pd.DataFrame, status_value: str) -> pd.DataFrame:
         return df
     return df[df["status"] == status_value].reset_index(drop=True)
 
-def create_usage(car_id: int, borrower_id: int, start_iso: str,
-                 end_iso: str | None, purpose: str | None,
-                 is_maint: bool = False) -> str:
+def create_usage(
+    car_id: int,
+    borrower_id: int,
+    start_iso: str,
+    end_iso: str | None,                # planned end
+    purpose: str | None,
+    is_maint: bool = False
+) -> str:
+
     if not car_id or not borrower_id or not start_iso:
         return "❌ โปรดเลือกทะเบียนรถ/ผู้เบิก และวันเวลาเริ่ม"
+
+    # parse start
     try:
         start_dt = datetime.fromisoformat(start_iso)
     except Exception:
         return "❌ รูปแบบวันเวลาเริ่มไม่ถูกต้อง"
 
-    end_dt = None
+    # parse planned end (optional)
+    planned_end_dt = None
     if end_iso:
         try:
-            end_dt = datetime.fromisoformat(end_iso)
+            planned_end_dt = datetime.fromisoformat(end_iso)
         except Exception:
             return "❌ รูปแบบวันเวลากำหนดคืนไม่ถูกต้อง"
+        if planned_end_dt < start_dt:
+            return "❌ กำหนดวันคืนต้องไม่ก่อนเวลาเริ่ม"
 
     with SessionLocal() as s:
-        car = s.query(Car).get(car_id)
-        user = s.query(User).get(borrower_id)
+        car = s.get(Car, car_id)
+        user = s.get(User, borrower_id)
         if not car or not user:
             return "❌ ไม่พบรถหรือผู้ใช้"
 
+        # กันทับซ้อน
+        if car.status in ("in_use", "maintenance"):
+            return f"❌ รถ {car.plate} อยู่ในสถานะ {car.status} อยู่แล้ว"
+
+        # สร้าง usage
         usg = UsageLog(
             car_id=car.id,
             borrower_id=user.id,
             start_time=start_dt,
-            end_time=end_dt,
-            purpose=(purpose or "").strip() or None
+            planned_end_time=planned_end_dt,     # <— ถ้ามีคอลัมน์นี้
+            purpose=(purpose or "").strip() or None,
+            is_maintenance=bool(is_maint),       # <— ถ้ามีคอลัมน์นี้
         )
-        # บันทึก maintenance flag
-        try:
-            setattr(usg, "is_maintenance", 1 if is_maint else 0)
-        except Exception:
-            pass
         s.add(usg)
-        car.status = "maintenance" if is_maint else "in_use"     # <<<< เปลี่ยนสถานะรถทันที
+
+        # อัปเดตสถานะรถ
+        car.status = "maintenance" if is_maint else "in_use"
+
+        try:
+            s.commit()
+        except IntegrityError as e:
+            s.rollback()
+            return f"❌ บันทึกไม่สำเร็จ: {e.orig}"
+
+        return f"✅ บันทึกการเบิก #{usg.id} สำเร็จ ({'maintenance' if is_maint else 'in_use'})"
+#คืนรถ
+def return_car_at(usage_id: int, end_iso: str | None) -> str:
+    """
+    ปิดรายการการใช้งาน (คืนรถ) พร้อมตั้ง end_time และเปลี่ยนสถานะรถเป็น available
+    """
+    # ถ้าไม่ระบุเวลา ให้ใช้เวลาปัจจุบัน
+    if not end_iso:
+        end_dt = datetime.now()
+    else:
+        try:
+            end_dt = datetime.fromisoformat(end_iso)
+        except Exception:
+            return "❌ รูปแบบวันเวลา 'คืนรถ' ไม่ถูกต้อง"
+
+    with SessionLocal() as s:  # type: Session
+        usg = s.get(UsageLog, usage_id)
+        if not usg:
+            return f"❌ ไม่พบรายการการใช้ #{usage_id}"
+
+        if usg.returned_at:
+            return f"ℹ️ รายการ #{usage_id} คืนรถแล้วก่อนหน้า"
+
+        # ป้องกันกรณีคืนก่อนเวลาเริ่ม
+        if end_dt < usg.start_time:
+            return "❌ เวลาคืนรถต้องไม่ก่อนเวลาเริ่มใช้"
+
+        # ตั้งเวลาคืนจริง และสถานะรถกลับเป็น available
+        usg.returned_at = end_dt
+
+        car = s.get(Car, usg.car_id)
+        if car:
+            car.status = "available"
+
         s.commit()
-    return "✅ บันทึกการเบิกสำเร็จ"
+        return f"✅ คืนรถเรียบร้อย (#{usage_id})"
 
-def return_car_at(usage_id: int, end_iso: str) -> str:
-    try:
-        end_dt = datetime.fromisoformat(end_iso)
-    except Exception:
-        return "❌ รูปแบบวันเวลาคืนรถไม่ถูกต้อง"
+def _compose_iso(date_str, hh, mm):
+    if not date_str:
+        return None
+    hh = hh or "00"
+    mm = mm or "00"
+    return f"{date_str}T{hh}:{mm}:00"
 
+def load_usage_df() -> pd.DataFrame:
+    ensure_returned_at_column()
+    ensure_is_maintenance_column()
+    ensure_planned_end_column()
     with SessionLocal() as s:
-        u: UsageLog | None = s.query(UsageLog).get(usage_id)
-        if not u:
-            return "❌ ไม่พบรายการเบิก"
-        if u.returned_at is not None:
-            return "ℹ️ คืนรถแล้ว"
-        u.returned_at = end_dt                  # ตั้งเวลาคืนจริง
-        if u.car:
-            u.car.status = "available"
-        s.commit()
-    return "✅ คืนรถเรียบร้อย"
+        q = (
+            s.query(
+                UsageLog.id.label("id"),
+                Car.plate.label("plate"),
+                User.full_name.label("borrower"),
+                UsageLog.start_time,
+                #UsageLog.end_time,
+                UsageLog.planned_end_time,
+                UsageLog.returned_at,
+                UsageLog.is_maintenance,
+                UsageLog.purpose,
+            )
+            .join(Car, Car.id == UsageLog.car_id)
+            .join(User, User.id == UsageLog.borrower_id)
+            .order_by(UsageLog.id.desc())
+        )
+        df = pd.read_sql(q.statement, s.bind)
+    df = df.rename(columns={"planned_end_time": "planned_return"})
+
+
+    # สถานะ
+    now = pd.Timestamp.now()
+    def _status(r):
+        if pd.notna(r["returned_at"]) and r["returned_at"] != "":
+            return "returned"
+        if r.get("is_maintenance"):
+            return "maintenance"
+        if pd.notna(r.get("planned_return")) and pd.Timestamp(r["planned_return"]) < now:
+            return "overdue"
+        return "in_use"
+    df["status"] = df.apply(_status, axis=1)
+ 
+# format datetime
+    for col in ["start_time", "planned_return", "returned_at"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
+            #df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    return df
     
 #ฟังก์ชั่นลบ  
 def all_usage_options():
@@ -203,6 +271,7 @@ def filter_by_range(df, range_start: str | None, range_end: str | None):
 def layout():
     ensure_returned_at_column()
     ensure_is_maintenance_column()
+    ensure_planned_end_column()
     full_df = load_usage_df()
 
     return html.Div([
@@ -273,7 +342,7 @@ def layout():
                                        style={"width": "90px", "display": "inline-block"}),
                       ])], style={"flex": 1.5, "minWidth": 200, "marginRight": 8}),
             html.Div([html.Label("วัตถุประสงค์"),
-                      dcc.Input(id="usg-purpose", type="text", placeholder="เช่น ออกภาคสนาม",
+                      dcc.Input(id="usg-purpose", type="text", placeholder="เช่น ออกภาคสนามติดตามงาน เชียงใหม่ ลำพูน ",
                                 style={"width": "100%"})],
                      style={"flex": 3, "minWidth": 260}),
         ], style={"display": "flex", "flexWrap": "wrap", "gap": 6, "alignItems": "end"}),
@@ -406,7 +475,7 @@ def on_delete(n, usage_id, status_value, open_only_values, range_start, range_en
     State("usg-start-date", "date"),
     State("usg-start-hh", "value"),
     State("usg-start-mm", "value"),
-    State("usg-end-date", "value"),
+    State("usg-end-date", "date"),
     State("usg-end-hh", "value"),
     State("usg-end-mm", "value"),
     State("usg-purpose", "value"),
@@ -593,3 +662,4 @@ def reset_range(n, status_value, open_only_values):
     if status_value and status_value != "all":
         df_full = df_full[df_full["status"] == status_value]
     return None, None, df_full.to_dict("records")
+
