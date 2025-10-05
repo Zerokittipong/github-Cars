@@ -6,11 +6,24 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from fleet.db import SessionLocal, engine
 from fleet.models import UsageLog, Car, User
+from fleet.db import engine as db_engine 
 
 
 dash.register_page(__name__, path="/usage", name="Usage")
 
 # ---------- helpers ----------
+# def _car_options_only_normal():
+#     sql = text("""
+#         SELECT id, plate
+#         FROM cars
+#         WHERE COALESCE(car_condition,'ปกติ') = 'ปกติ'
+#         ORDER BY plate
+#     """)
+#     with db_engine.begin() as conn:
+#         rows = conn.execute(sql).fetchall()
+#     return [{"label": r[1], "value": r[0]} for r in rows]
+
+
 # ---------- schema guard: add returned_at if missing ----------
 def ensure_returned_at_column():
     with engine.connect() as conn:
