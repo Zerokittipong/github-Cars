@@ -106,8 +106,7 @@ layout = html.Div(
                         html.Label("หมายเหตุ"),
                         dcc.Input(id="in-note", type="text", style={"width":"280px"}),
                     ],
-                    style={"display":"inline-block","marginRight":"12px"}
-                ),
+                    style={"display":"inline-block","marginRight":"12px"}),
             ],
             style={"marginBottom":"10px"}
         ),
@@ -115,40 +114,59 @@ layout = html.Div(
         # ปุ่มเครื่องมือ
         html.Div(
             [
-                html.Button("🆕 ใบงานใหม่", id="btn-new", style={"marginRight":"6px"}),
-                html.Button("💾 บันทึกใบงาน", id="btn-save", style={"marginRight":"6px"}),
-                html.Button("⬇️ Export CSV", id="btn-export", style={"marginRight":"6px"}),
+        # กลุ่มซ้าย: ปุ่มการทำงาน + ข้อความสถานะ
+                html.Div(
+                    [
+                        html.Button("🆕 ใบงานใหม่", id="btn-new"),
+                        html.Button("💾 บันทึกใบงาน", id="btn-save"),
+                        html.Button("⬇️ Export CSV", id="btn-export"),
+                        html.Button("⬇️ ดาวน์โหลด PDF", id="btn-download-pdf"),
+                        html.Span(id="msg_maint", style={"marginLeft":"10px","color":"crimson"}),
+                    ],
+                    style={"display":"flex","gap":"6px","alignItems":"center"}
+                ),
+
+        # กลุ่มขวา: แนบ PDF (ดันไปชิดขวา)
                 dcc.Upload(
                     id="upload-maint-pdf",
                     children=html.Div(["📄 แนบ PDF", " ", html.A("(เลือกไฟล์)")]),
                     accept="application/pdf",
                     multiple=False,
-                    style={"display":"inline-block","padding":"4px 10px","border":"1px dashed #aaa","borderRadius":"8px","marginRight":"6px"}
+                    style={
+                        "display":"inline-block",
+                        "padding":"4px 10px",
+                        "border":"1px dashed #aaa",
+                        "borderRadius":"8px",
+                        "marginLeft":"auto",          # <<— ดันไปขวาสุด
+                    },
                 ),
-                html.Button("⬇️ ดาวน์โหลด PDF", id="btn-download-pdf"),
-                html.Span(id="msg_maint", style={"marginLeft":"10px","color":"crimson"}),
             ],
-            style={"marginBottom":"10px"}
+            style={"display":"flex","alignItems":"center","gap":"8px","marginBottom":"10px"}
         ),
 
         # ตารางรายการ
-        html.H4("รายการซ่อม/อะไหล่"),
-        dash_table.DataTable(
-            id="tbl-items",
-            data=[],
-            columns=[
-                {"name":"#", "id":"item_no", "type":"numeric", "editable":True},
-                {"name":"รายการ", "id":"description", "type":"text", "editable":True},
-                {"name":"จำนวน", "id":"qty", "type":"numeric", "editable":True},
-                {"name":"ราคา/หน่วย", "id":"unit_price", "type":"numeric", "editable":True},
-                {"name":"ยอดเงิน", "id":"amount", "type":"numeric", "editable":False},
+        html.Div(
+            [
+                html.H4("รายการซ่อม/อะไหล่", style={"margin":"6px 0"}),  # ลดระยะห่าง
+                dash_table.DataTable(
+                    id="tbl-items",
+                    data=[],
+                    columns=[
+                        {"name":"#", "id":"item_no", "type":"numeric", "editable":True},
+                        {"name":"รายการ", "id":"description", "type":"text", "editable":True},
+                        {"name":"จำนวน", "id":"qty", "type":"numeric", "editable":True},
+                        {"name":"ราคา/หน่วย", "id":"unit_price", "type":"numeric", "editable":True},
+                        {"name":"ยอดเงิน", "id":"amount", "type":"numeric", "editable":False},
+                    ],
+                    editable=True,
+                    row_deletable=True,
+                    page_action="none",
+                    style_table={"maxHeight":"45vh","overflowY":"auto","minWidth":"700px"},
+                    style_cell={"padding":"6px","fontSize":"14px"},
+                    style_header={"backgroundColor":"#f8f6ff","fontWeight":"bold"},
+                ),
             ],
-            editable=True,
-            row_deletable=True,
-            page_action="none",
-            style_table={"maxHeight":"45vh","overflowY":"auto","minWidth":"700px"},
-            style_cell={"padding":"6px","fontSize":"14px"},
-            style_header={"backgroundColor":"#f8f6ff","fontWeight":"bold"},
+            style={"marginBottom":"10px"}   # เว้นนิดเดียวก่อนแถวปุ่ม “เพิ่มรายการ…”
         ),
         html.Div(
             [
