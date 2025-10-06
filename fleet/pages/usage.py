@@ -12,16 +12,16 @@ from fleet.db import engine as db_engine
 dash.register_page(__name__, path="/usage", name="Usage")
 
 # ---------- helpers ----------
-# def _car_options_only_normal():
-#     sql = text("""
-#         SELECT id, plate
-#         FROM cars
-#         WHERE COALESCE(car_condition,'ปกติ') = 'ปกติ'
-#         ORDER BY plate
-#     """)
-#     with db_engine.begin() as conn:
-#         rows = conn.execute(sql).fetchall()
-#     return [{"label": r[1], "value": r[0]} for r in rows]
+def _car_options_only_normal():
+    sql = text("""
+        SELECT id, plate
+        FROM cars
+        WHERE COALESCE(car_condition,'ปกติ') = 'ปกติ'
+        ORDER BY plate
+    """)
+    with db_engine.begin() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [{"label": r[1], "value": r[0]} for r in rows]
 
 
 # ---------- schema guard: add returned_at if missing ----------
@@ -97,16 +97,13 @@ def create_usage(
     purpose: str | None,
     is_maint: bool = False
 ) -> str:
-
     if not car_id or not borrower_id or not start_iso:
         return "❌ โปรดเลือกทะเบียนรถ/ผู้เบิก และวันเวลาเริ่ม"
-
     # parse start
     try:
         start_dt = datetime.fromisoformat(start_iso)
     except Exception:
         return "❌ รูปแบบวันเวลาเริ่มไม่ถูกต้อง"
-
     # parse planned end (optional)
     planned_end_dt = None
     if end_iso:
@@ -116,17 +113,14 @@ def create_usage(
             return "❌ รูปแบบวันเวลากำหนดคืนไม่ถูกต้อง"
         if planned_end_dt < start_dt:
             return "❌ กำหนดวันคืนต้องไม่ก่อนเวลาเริ่ม"
-
     with SessionLocal() as s:
         car = s.get(Car, car_id)
         user = s.get(User, borrower_id)
         if not car or not user:
             return "❌ ไม่พบรถหรือผู้ใช้"
-
         # กันทับซ้อน
         if car.status in ("in_use", "maintenance"):
             return f"❌ รถ {car.plate} อยู่ในสถานะ {car.status} อยู่แล้ว"
-
         # สร้าง usage
         usg = UsageLog(
             car_id=car.id,
@@ -137,17 +131,16 @@ def create_usage(
             is_maintenance=bool(is_maint),       # <— ถ้ามีคอลัมน์นี้
         )
         s.add(usg)
-
         # อัปเดตสถานะรถ
         car.status = "maintenance" if is_maint else "in_use"
-
         try:
             s.commit()
         except IntegrityError as e:
             s.rollback()
             return f"❌ บันทึกไม่สำเร็จ: {e.orig}"
-
         return f"✅ บันทึกการเบิก #{usg.id} สำเร็จ ({'maintenance' if is_maint else 'in_use'})"
+
+
 #คืนรถ
 def return_car_at(usage_id: int, end_iso: str | None) -> str:
     """
@@ -329,8 +322,9 @@ def layout():
 # ฟอร์มสร้าง usage (มี end_time เป็นกำหนดวันคืน)
         html.Div([
             html.Div([html.Label("ทะเบียนรถ *"),
-                      dcc.Dropdown(id="usg-car", options=load_car_options(True), placeholder="เลือกทะเบียนรถ")],
+                      dcc.Dropdown(id="usg-car", options=_car_options_only_normal(), placeholder="เลือกทะเบียนรถ", clearable=True)],
                      style={"flex": 2, "minWidth": 240, "marginRight": 8}),
+           
             html.Div([html.Label("ผู้เบิก *"),
                       dcc.Dropdown(id="usg-user", options=load_user_options(), placeholder="เลือกผู้เบิก")],
                      style={"flex": 2, "minWidth": 220, "marginRight": 8}),
@@ -372,7 +366,7 @@ def layout():
             html.Button("➕ บันทึกการเบิก", id="btn-create"),
             html.Button("🔄 โหลดทะเบียนรถว่าง", id="btn-reload-cars", style={"marginLeft": "8px"}),
             html.Button("🗑️ ลบรายการ", id="btn-delete", style={"marginLeft": 8, "color": "#B00020"}),
-
+            html.Button("รีเฟรชรายการรถ", id="btn-reload-cars", n_clicks=0, style={"marginLeft":"8px"}),
             html.Span(" | ", style={"margin": "0 8px"}),
 
             dcc.Dropdown(id="del-usage", options=[], placeholder="เลือกรายการเพื่อ 'ลบ'",
@@ -432,6 +426,13 @@ def layout():
     ])
 
 #---------- callbacks ----------
+@callback(
+    Output("sel-car", "options"),
+    Input("btn-reload-cars", "n_clicks"),
+    prevent_initial_call=True
+)
+def reload_car_options(_):
+    return _car_options_only_normal()    
 @callback(
     Output("usg-msg", "children", allow_duplicate=True),
     Output("usage-table", "data", allow_duplicate=True),
@@ -541,7 +542,7 @@ def on_create_usage(n_clicks,
     return (
         msg,
         df_full.to_dict("records"),
-        load_car_options(True),
+        _car_options_only_normal(),
         open_usage_options(),
         all_usage_options(),
         None

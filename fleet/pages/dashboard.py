@@ -114,6 +114,7 @@ def read_cars_status_display() -> pd.DataFrame:
     FROM cars c
     LEFT JOIN m ON m.car_id = c.id
     LEFT JOIN a ON a.car_id = c.id
+    WHERE COALESCE(c.car_condition,'ปกติ') = 'ปกติ'
     """)
     with db_engine.begin() as conn:
         rs = conn.execute(sql).mappings().all()
@@ -248,6 +249,31 @@ layout = html.Div([
     dcc.Store(id="cars-cache",   data=_cars_df.to_dict("records")),
 ])
 
+#เวลาตาม Time zone
+def current_fiscal_year():
+    return _fiscal_year(today_local())
+
+#ป้องกันส่งข้อมูลว่างเปล่ามาพอต
+def _empty_bar(title, x_col="plate", y_col="count"):
+    df = pd.DataFrame({x_col: [], y_col: []})
+    fig = px.bar(df, x=x_col, y=y_col, title=title)
+    fig.update_yaxes(tickformat=",")
+    return fig
+
+def _empty_donut():
+    df = pd.DataFrame({"label_th":["พร้อมใช้งาน","ใช้งานอยู่","เข้าซ่อม"], "count":[0,0,0]})
+    return px.pie(df, values="count", names="label_th", hole=0.5,
+                  title="สถานะรถ (รวม 0 คัน)")
+
+def _fallback_outputs():
+    fig_donut = _empty_donut()
+    fig_top_borrow = _empty_bar("Top 5 รถที่ใช้งานบ่อยสุด (ปีงบฯ)")
+    fig_top_repair = _empty_bar("Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
+    kpi_today = html.H3("ใช้งานวันนี้: 0 ครั้ง")
+    kpi_month = html.H3("ใช้งานเดือนนี้: 0 ครั้ง")
+    kpi_fy    = html.H3("ใช้งานปีงบฯ: 0 ครั้ง")
+    return fig_donut, kpi_today, kpi_month, kpi_fy, fig_top_borrow, fig_top_repair
+
 # ---------- Callbacks ----------
 @callback(
     Output("fig-monthly","figure"),
@@ -257,8 +283,8 @@ layout = html.Div([
     State("orders-cache","data"),
 )
 def update_figs(fy, months_window, cache):
-    df_orders = _ensure_types(cache)      # ← ใช้ alias ที่เพิ่งเพิ่ม
-    fy = int(fy) if fy is not None else _fiscal_year(pd.Timestamp.today())
+    df_orders = read_orders()     # ← ใช้ alias ที่เพิ่งเพิ่ม
+    fy = int(fy) if fy is not None else current_fiscal_year()
     months_window = int(months_window or 3)
 
     fig1 = _fig_monthly(df_orders, fy)
@@ -273,70 +299,80 @@ def update_figs(fy, months_window, cache):
     Output("fig-top-borrow","figure"),
     Output("fig-top-repair","figure"),
     Input("dd-fy","value"),
-    State("orders-cache","data"),
-    State("usage-cache","data"),
-    State("cars-cache","data"),
 )
-def update_dashboard(fy, orders_cache, usage_cache, cars_cache):
-    fy = int(fy)
-    fy_start, fy_end = _fy_bounds(fy)
-    today = today_local()
-    m_start, m_end = _month_bounds(today)
+def update_dashboard(fy):
+    try:
+        fy = int(fy) if fy is not None else _fiscal_year(today_local())
+        fy_start, fy_end = _fy_bounds(fy)
+        today = today_local()
+        m_start, m_end = _month_bounds(today)
 
-    # ----- Donut: สถานะรถ -----
-    cars = pd.DataFrame(cars_cache or [])
-    categories = pd.Index(["available", "in_use", "maintenance"], name="status_display")
-    if cars.empty:
-        donut_df = pd.DataFrame({"status_display": categories, "count": [0, 0, 0]})
-    else:
-        donut_df = (cars.groupby("status_display")["id"]
-                         .count()
-                         .reindex(categories, fill_value=0)
-                         .reset_index(name="count"))
-    label_map = {"available":"พร้อมใช้งาน", "in_use":"ใช้งานอยู่", "maintenance":"เข้าซ่อม"}
-    donut_df["label_th"] = donut_df["status_display"].map(label_map)
-    fig_donut = px.pie(donut_df, values="count", names="label_th", hole=0.5,
-                       title=f"สถานะรถ (รวม {int(donut_df['count'].sum())} คัน)")
+        # -------- อ่านข้อมูลสด --------
+        cars   = read_cars_status_display()
+        usage  = read_usage()
+        orders = read_orders()
 
-    # ----- KPIs: การใช้งาน -----
-    usage = _ensure_usage_types(pd.DataFrame(usage_cache or []))
-    if usage.empty:
-        k_today = k_month = k_fy = 0
-        u_fy = pd.DataFrame()
-    else:
-        u = usage[usage["is_maintenance"] == 0].copy()
-        u_today = u[u["start_time"].dt.date == today.date()]
-        u_month = u[(u["start_time"] >= m_start) & (u["start_time"] < m_end)]
-        u_fy    = u[(u["start_time"] >= fy_start) & (u["start_time"] < fy_end)]
-        k_today = int(len(u_today))
-        k_month = int(len(u_month))
-        k_fy    = int(len(u_fy))
-    kpi_today = html.H3(f"ใช้งานวันนี้: {k_today:,} ครั้ง")
-    kpi_month = html.H3(f"ใช้งานเดือนนี้: {k_month:,} ครั้ง")
-    kpi_fy    = html.H3(f"ใช้งานปีงบฯ {fy}/{(fy+1)%100:02d}: {k_fy:,} ครั้ง")
+        # ----- Donut -----
+        categories = pd.Index(["available","in_use","maintenance"], name="status_display")
+        if cars.empty:
+            fig_donut = _empty_donut()
+        else:
+            donut_df = (cars.groupby("status_display")["id"]
+                           .count().reindex(categories, fill_value=0)
+                           .reset_index(name="count"))
+            label_map = {"available":"พร้อมใช้งาน","in_use":"ใช้งานอยู่","maintenance":"เข้าซ่อม"}
+            donut_df["label_th"] = donut_df["status_display"].map(label_map)
+            fig_donut = px.pie(donut_df, values="count", names="label_th", hole=0.5,
+                               title=f"สถานะรถ (รวม {int(donut_df['count'].sum())} คัน)")
 
-    # ----- Top 5 ใช้งานบ่อย (ปีงบฯ) -----
-    if u_fy.empty:
-        fig_top_borrow = px.bar(x=[], y=[], title="Top 5 รถที่ใช้งานบ่อยสุด (ปีงบฯ)")
-    else:
-        top_b = u_fy.groupby("car_id")["start_time"].count().sort_values(ascending=False).head(5)
-        cmap = cars_lookup()
-        df_b = pd.DataFrame({"plate": [cmap.get(i, f"ID {i}") for i in top_b.index],
-                             "count": top_b.values})
-        fig_top_borrow = px.bar(df_b, x="plate", y="count", title="Top 5 รถที่ใช้งานบ่อยสุด (ปีงบฯ)")
-        fig_top_borrow.update_yaxes(tickformat=",")
+        # ----- KPIs -----
+        usage = _ensure_usage_types(usage)
+        if usage.empty:
+            k_today = k_month = k_fy = 0
+            u_fy = pd.DataFrame()
+        else:
+            u = usage[usage["is_maintenance"] == 0]
+            u_today = u[u["start_time"].dt.date == today.date()]
+            u_month = u[(u["start_time"] >= m_start) & (u["start_time"] < m_end)]
+            u_fy    = u[(u["start_time"] >= fy_start) & (u["start_time"] < fy_end)]
+            k_today = len(u_today); k_month = len(u_month); k_fy = len(u_fy)
+        kpi_today = html.H3(f"ใช้งานวันนี้: {k_today:,} ครั้ง")
+        kpi_month = html.H3(f"ใช้งานเดือนนี้: {k_month:,} ครั้ง")
+        kpi_fy    = html.H3(f"ใช้งานปีงบฯ {fy}/{(fy+1)%100:02d}: {k_fy:,} ครั้ง")
 
-    # ----- Top 5 เข้าซ่อมบ่อย (ปีงบฯ) -----
-    orders = _ensure_dt_num(pd.DataFrame(orders_cache or []), "accept_date", "grand_total")
-    if orders.empty:
-        fig_top_repair = px.bar(x=[], y=[], title="Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
-    else:
-        o_fy = orders[(orders["accept_date"] >= fy_start) & (orders["accept_date"] < fy_end)]
-        top_r = o_fy.groupby("car_id")["accept_date"].count().sort_values(ascending=False).head(5)
-        cmap = cars_lookup()
-        df_r = pd.DataFrame({"plate": [cmap.get(i, f"ID {i}") for i in top_r.index],
-                             "count": top_r.values})
-        fig_top_repair = px.bar(df_r, x="plate", y="count", title="Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
-        fig_top_repair.update_yaxes(tickformat=",")
+        # ----- Top 5 ใช้งานบ่อย -----
+        if u_fy.empty:
+            fig_top_borrow = _empty_bar("Top 5 รถที่ใช้งานบ่อยสุด (ปีงบฯ)")
+        else:
+            top_b = (u_fy.groupby("car_id")["start_time"]
+                       .count().sort_values(ascending=False).head(5))
+            cmap = cars_lookup()
+            df_b = pd.DataFrame({"plate":[cmap.get(i, f"ID {i}") for i in top_b.index],
+                                 "count":top_b.values})
+            fig_top_borrow = px.bar(df_b, x="plate", y="count",
+                                    title="Top 5 รถที่ใช้งานบ่อยสุด (ปีงบฯ)")
+            fig_top_borrow.update_yaxes(tickformat=",")
 
-    return fig_donut, kpi_today, kpi_month, kpi_fy, fig_top_borrow, fig_top_repair
+        # ----- Top 5 ซ่อมบ่อย -----
+        if orders.empty:
+            fig_top_repair = _empty_bar("Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
+        else:
+            o_fy = orders[(orders["accept_date"] >= fy_start) & (orders["accept_date"] < fy_end)]
+            if o_fy.empty:
+                fig_top_repair = _empty_bar("Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
+            else:
+                top_r = (o_fy.groupby("car_id")["accept_date"]
+                           .count().sort_values(ascending=False).head(5))
+                cmap = cars_lookup()
+                df_r = pd.DataFrame({"plate":[cmap.get(i, f"ID {i}") for i in top_r.index],
+                                     "count":top_r.values})
+                fig_top_repair = px.bar(df_r, x="plate", y="count",
+                                        title="Top 5 รถที่เข้าซ่อมมากสุด (ปีงบฯ)")
+                fig_top_repair.update_yaxes(tickformat=",")
+
+        return fig_donut, kpi_today, kpi_month, kpi_fy, fig_top_borrow, fig_top_repair
+
+    except Exception as e:
+        # log error แล้วคืน fallback เพื่อไม่ให้ Dash เจอ None
+        print("update_dashboard error:", e)
+        return _fallback_outputs()
