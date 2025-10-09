@@ -146,6 +146,20 @@ def init_maintenance_tables():
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_maint_items_order ON maintenance_items (order_id)"))
 
+        # ---- NEW: ตารางเชื่อมกรรมการตรวจรับ (order_id ↔ user_id) ----
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS maintenance_committee (
+                order_id INTEGER NOT NULL,
+                user_id  INTEGER NOT NULL,
+                PRIMARY KEY (order_id, user_id),
+                FOREIGN KEY(order_id) REFERENCES maintenance_orders(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id)  REFERENCES users(id)              ON DELETE RESTRICT
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mc_order ON maintenance_committee (order_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_mc_user  ON maintenance_committee (user_id)"))
+        
+     
         # (กันพลาด schema เก่า) เติมคอลัมน์ที่หายไป
         def ensure_cols(table, pairs):
             cols = {r[1] for r in conn.execute(text(f"PRAGMA table_info({table})")).all()}
@@ -162,6 +176,32 @@ def init_maintenance_tables():
             ("grand_total", "grand_total REAL DEFAULT 0.0"),
         ])
 
+def backfill_committees_from_legacy():
+    """ย้ายข้อมูลจาก maintenance_orders.committee (TEXT รายชื่อคั่น ,) → maintenance_committee
+       ชื่อที่หา user_id ไม่เจอจะถูกข้ามไป"""
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys = ON"))
+
+        users = conn.execute(text("SELECT id, full_name FROM users")).mappings().all()
+        name2id = {u["full_name"].strip(): u["id"] for u in users}
+
+        orders = conn.execute(text("""
+            SELECT id, committee
+            FROM maintenance_orders
+            WHERE committee IS NOT NULL AND TRIM(committee) <> ''
+        """)).mappings().all()
+
+        for o in orders:
+            names = [s.strip() for s in (o["committee"] or "").split(",") if s.strip()]
+            uids  = [name2id[n] for n in names if n in name2id]
+            if not uids:
+                continue
+            conn.execute(text("DELETE FROM maintenance_committee WHERE order_id=:oid"), {"oid": o["id"]})
+            conn.execute(
+                text("INSERT OR IGNORE INTO maintenance_committee (order_id, user_id) VALUES (:oid, :uid)"),
+                [{"oid": o["id"], "uid": uid} for uid in uids]
+            )
+
 def init_db():
     # ถ้ามี ORM models อื่น ๆ ก็ import เพื่อ create_all ได้ แต่ไม่บังคับ
     try:
@@ -175,10 +215,89 @@ def init_db():
     init_usage_logs_table()
     init_maintenance_tables()
 
+def install_usage_triggers():
+    with engine.begin() as conn:
+        conn.execute(text("PRAGMA foreign_keys = ON"))
+
+        conn.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS usage_ins_set_in_use
+        AFTER INSERT ON usage_logs
+        WHEN NEW.returned_at IS NULL
+        BEGIN
+          UPDATE cars SET status='in_use' WHERE id=NEW.car_id;
+        END;
+        """))
+
+        conn.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS usage_upd_set_available
+        AFTER UPDATE OF returned_at ON usage_logs
+        WHEN NEW.returned_at IS NOT NULL
+        BEGIN
+          UPDATE cars
+          SET status='available'
+          WHERE id=NEW.car_id
+            AND NOT EXISTS (
+              SELECT 1 FROM usage_logs
+              WHERE car_id=NEW.car_id AND returned_at IS NULL
+            );
+        END;
+        """))
+
+        conn.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS usage_del_maybe_set_available
+        AFTER DELETE ON usage_logs
+        BEGIN
+          UPDATE cars
+          SET status='available'
+          WHERE id=OLD.car_id
+            AND NOT EXISTS (
+              SELECT 1 FROM usage_logs
+              WHERE car_id=OLD.car_id AND returned_at IS NULL
+            );
+        END;
+        """))
+
+        conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS ix_usage_active
+        ON usage_logs(car_id)
+        WHERE returned_at IS NULL;
+        """))
+
+    print("✅ ติดตั้ง Trigger สำหรับอัปเดตสถานะรถสำเร็จ")
+
+
+# --- 3. ฟังก์ชันรีเซ็ตสถานะรถทั้งหมด (ใช้ครั้งเดียวตอนกู้ระบบ) ---
+def reconcile_cars_once():
+    with engine.begin() as conn:
+        conn.execute(text("""
+        UPDATE cars
+        SET status = CASE
+          WHEN EXISTS (
+            SELECT 1 FROM usage_logs ul
+            WHERE ul.car_id = cars.id AND ul.returned_at IS NULL
+          ) THEN 'in_use'
+          ELSE 'available'
+        END;
+        """))
+    print("✅ รีเซ็ตสถานะรถทั้งหมดเรียบร้อย")
 
 
 
 if __name__ == "__main__":
     init_db()
-    print("✅ Database initialized")
+    install_usage_triggers()   # ติดตั้งทริกเกอร์ (มีผลกับเหตุการณ์อนาคต)
+    # reconcile_cars_once()
+    
 
+# --- ชั่วคราว: ปิดรายการ usage ที่ค้างของ car_id 8 ---
+    # from sqlalchemy import text
+    # with engine.begin() as conn:
+    #     conn.execute(text("""
+    #         UPDATE usage_logs
+    #         SET returned_at = datetime('now')
+    #         WHERE car_id = 8 AND returned_at IS NULL
+    #     """))
+    # reconcile_cars_once()
+    # --- ลบโค้ดบล็อกนี้หลังรันเสร็จ ---
+
+    print("✅ Database initialized")

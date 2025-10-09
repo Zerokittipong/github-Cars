@@ -48,7 +48,19 @@ def ensure_planned_end_column():
             conn.execute(text("ALTER TABLE usage_logs ADD COLUMN planned_end_time DATETIME"))
             conn.commit()
 
-            
+def reconcile_all_cars():
+    with db_engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE cars
+            SET status = CASE
+              WHEN EXISTS (
+                SELECT 1 FROM usage_logs ul
+                WHERE ul.car_id = cars.id AND ul.returned_at IS NULL
+              ) THEN 'in_use'
+              ELSE 'available'
+            END
+        """))
+    
 def open_usage_options():
     df = load_usage_df()
     if df.empty:
@@ -222,10 +234,16 @@ def load_usage_df() -> pd.DataFrame:
     df["status"] = df.apply(_status, axis=1)
  
 # format datetime
+    # for col in ["start_time", "planned_return", "returned_at"]:
+    #     if col in df.columns:
+    #         df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
+     
+    # return df
+
     for col in ["start_time", "planned_return", "returned_at"]:
         if col in df.columns:
-            df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d %H:%M").fillna("")
-            #df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+            s = pd.to_datetime(df[col], errors="coerce")
+            df[col] = s.dt.strftime("%Y-%m-%d %H:%M").fillna("")
     return df
     
 #ฟังก์ชั่นลบ  
@@ -271,6 +289,16 @@ def filter_by_range(df, range_start: str | None, range_end: str | None):
     mask = (pe >= rs) & (st <= re)
     return df[mask].reset_index(drop=True)
 
+def ensure_car_available(conn, car_id: int):
+    row = conn.execute(text("""
+        SELECT 1
+        FROM usage_logs
+        WHERE car_id = :cid AND returned_at IS NULL
+        LIMIT 1
+    """), {"cid": int(car_id)}).first()
+    if row:
+        # ถ้าคันนี้ยังมีรายการค้างอยู่ ให้ยกเลิกการบันทึก
+        raise ValueError("รถคันนี้ยังไม่ถูกคืนจากรายการเดิม")
 
 
 # ---------- layout ----------
@@ -366,7 +394,7 @@ def layout():
             html.Button("➕ บันทึกการเบิก", id="btn-create"),
             html.Button("🔄 โหลดทะเบียนรถว่าง", id="btn-reload-cars", style={"marginLeft": "8px"}),
             html.Button("🗑️ ลบรายการ", id="btn-delete", style={"marginLeft": 8, "color": "#B00020"}),
-            html.Button("รีเฟรชรายการรถ", id="btn-reload-cars", n_clicks=0, style={"marginLeft":"8px"}),
+    
             html.Span(" | ", style={"margin": "0 8px"}),
 
             dcc.Dropdown(id="del-usage", options=[], placeholder="เลือกรายการเพื่อ 'ลบ'",
@@ -426,6 +454,8 @@ def layout():
     ])
 
 #---------- callbacks ----------
+
+
 @callback(
     Output("sel-car", "options"),
     Input("btn-reload-cars", "n_clicks"),
@@ -527,6 +557,14 @@ def on_create_usage(n_clicks,
         end_iso = f"{end_date}T{eh}:{em}:00"
 
     is_maint = ("1" in (maint_values or []))
+
+    try:
+        with db_engine.begin() as conn:
+            ensure_car_available(conn, int(car_id))
+    except ValueError as e:
+        # รถยังไม่ถูกคืนจากรายการเดิม
+        return (str(e), no_update, _car_options_only_normal(),
+                open_usage_options(), all_usage_options(), None)
 
     # === สร้าง usage ===
     msg = create_usage(car_id, user_id, start_iso, end_iso, purpose, is_maint)

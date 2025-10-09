@@ -12,6 +12,16 @@ MAINT_UPLOAD_DIR = (UPLOAD_DIR.parent / "maintenance")
 MAINT_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- helpers ----------
+def _upsert_committee(conn, order_id: int, user_ids: list[int]):
+    """แทนที่กรรมการของใบงานด้วย user_id ที่ส่งมา (ทำในทรานแซกชันเดียว)"""
+    conn.execute(text("DELETE FROM maintenance_committee WHERE order_id=:oid"),
+                 {"oid": int(order_id)})
+    if user_ids:
+        conn.execute(
+            text("INSERT INTO maintenance_committee (order_id, user_id) VALUES (:oid, :uid)"),
+            [{"oid": int(order_id), "uid": int(uid)} for uid in user_ids]
+        )
+
 def q(sql, params=None):
     with db_engine.begin() as conn:
         return conn.execute(text(sql), params or {})
@@ -22,12 +32,22 @@ def cars_options():
 
 def users_options():
     rows = q("SELECT id, full_name FROM users ORDER BY full_name").mappings().all()
-    return [{"label": r["full_name"], "value": r["full_name"]} for r in rows]   # เก็บเป็นชื่อ
+    return [{"label": r["full_name"], "value": r["id"]} for r in rows]   # เก็บเป็นชื่อ
 
 def fetch_orders_df():
     rows = q("""
-        SELECT o.id, c.plate, o.repair_date, o.accept_date,
-               o.center_name, o.committee, o.total_qty, o.subtotal, o.vat, o.grand_total, o.pdf_path
+        SELECT  o.id,
+                c.plate,
+                o.repair_date,
+                o.accept_date,
+                o.center_name,
+                COALESCE((
+                    SELECT GROUP_CONCAT(u.full_name, ', ')
+                    FROM maintenance_committee mc
+                    JOIN users u ON u.id = mc.user_id
+                    WHERE mc.order_id = o.id
+                ), '') AS committee,        -- << แสดงชื่อจากตารางเชื่อม
+                o.total_qty, o.subtotal, o.vat, o.grand_total, o.pdf_path
         FROM maintenance_orders o
         LEFT JOIN cars c ON c.id = o.car_id
         ORDER BY COALESCE(o.accept_date, o.repair_date) DESC, o.id DESC
@@ -49,9 +69,22 @@ def fetch_items_df(order_id:int):
     return pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         "id","item_no","description","qty","unit_price","amount"
     ])
+def _fetch_committee_ids(order_id: int) -> list[int]:
+    rows = q("SELECT user_id FROM maintenance_committee WHERE order_id=:i",
+             {"i": int(order_id)}).all()
+    return [r[0] for r in rows]
 
+def _upsert_committee(conn, order_id:int, user_ids:list[int]):
+    conn.execute(text("DELETE FROM maintenance_committee WHERE order_id=:oid"), {"oid": int(order_id)})
+    if user_ids:
+        conn.execute(
+            text("INSERT INTO maintenance_committee (order_id, user_id) VALUES (:oid, :uid)"),
+            [{"oid": int(order_id), "uid": int(uid)} for uid in user_ids]
+        )
 # ---------- layout ----------
-layout = html.Div(
+
+def layout():
+    return html.Div(
     [
         html.H1("Maintenance"),
 
@@ -224,13 +257,13 @@ layout = html.Div(
 
 # โหลดเริ่มต้น
 @callback(
-    Output("tbl-orders","data"),
-    Output("tbl-items","data"),
-    Output("maint-items-store","data"),
-    Output("maint-current-order-id","data"),
-    Output("orders-store","data"), 
+    Output("tbl-orders","data", allow_duplicate=True),
+    Output("tbl-items","data", allow_duplicate=True),          # เพิ่ม allow_duplicate
+    Output("maint-items-store","data", allow_duplicate=True),  # เพิ่ม allow_duplicate
+    Output("maint-current-order-id","data", allow_duplicate=True),  # เพิ่ม allow_duplicate
+    Output("orders-store","data", allow_duplicate=True),       # แนะนำให้ใส่ด้วยเพื่อความสม่ำเสมอ
     Input("tbl-orders","id"),
-    prevent_initial_call=False
+    prevent_initial_call="initial_duplicate"   # <<< เปลี่ยนจาก False
 )
 def init_page(_):
     orders = fetch_orders_df()
@@ -243,34 +276,7 @@ def init_page(_):
     ) 
 
 # เลือกใบงาน -> โหลดฟอร์ม + รายการ
-@callback(
-    Output("sel-car","value"),
-    Output("date-repair","date"),
-    Output("date-accept","date"),
-    Output("in-center","value"),
-    Output("sel-committee","value"),
-    Output("in-note","value"),
-    Output("tbl-items","data", allow_duplicate=True),
-    Output("maint-items-store","data", allow_duplicate=True),
-    Output("maint-current-order-id","data", allow_duplicate=True),
-    Input("tbl-orders","derived_virtual_selected_rows"),
-    State("tbl-orders","derived_virtual_data"),
-    prevent_initial_call=True
-)
-def load_order(sel_rows, vdata):
-    if not sel_rows:
-        return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
-    idx = sel_rows[0]
-    order = vdata[idx]
-    # โหลด header
-    header = q("SELECT * FROM maintenance_orders WHERE id=:i", {"i": order["id"]}).mappings().first()
-    # รายการ
-    items_df = fetch_items_df(order["id"])
-    # committee เก็บเป็นสตริง -> list
-    committee_list = [s.strip() for s in (header["committee"] or "").split(",") if s.strip()]
-    return (header["car_id"], header["repair_date"], header["accept_date"], header["center_name"],
-            committee_list, header["note"] or "",
-            items_df.to_dict("records"), items_df.to_dict("records"), order["id"])
+
 
 # เพิ่มแถวรายการ
 @callback(
@@ -308,82 +314,6 @@ def recalc(rows):
     return df.to_dict("records"), df.to_dict("records"), txt
 
 # บันทึกใบงาน
-@callback(
-    Output("tbl-orders","data", allow_duplicate=True),
-    Output("orders-store","data", allow_duplicate=True),
-    Output("msg_maint","children"),
-    Input("btn-save","n_clicks"),
-    State("maint-current-order-id","data"),
-    State("sel-car","value"),
-    State("date-repair","date"),
-    State("date-accept","date"),
-    State("in-center","value"),
-    State("sel-committee","value"),
-    State("in-note","value"),
-    State("maint-items-store","data"),
-    prevent_initial_call=True
-)
-def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_vals, note, items_rows):
-    if not n:
-        return no_update, ""
-    if not car_id:
-        return no_update, "กรุณาเลือกทะเบียนรถ"
-    items_df = pd.DataFrame(items_rows or [])
-    # คำนวณรวม
-    items_df["qty"] = pd.to_numeric(items_df["qty"], errors="coerce").fillna(0).astype(int)
-    items_df["unit_price"] = pd.to_numeric(items_df["unit_price"], errors="coerce").fillna(0.0)
-    items_df["amount"] = (items_df["qty"] * items_df["unit_price"]).round(2)
-    total_qty = int(items_df["qty"].sum())
-    subtotal = float(items_df["amount"].sum())
-    vat = round(subtotal * 0.07, 2)
-    total = round(subtotal + vat, 2)
-    committee = ", ".join(committee_vals or [])
-
-    with db_engine.begin() as conn:
-        if order_id:
-            # update header
-            conn.execute(text("""
-                UPDATE maintenance_orders SET
-                    car_id=:car, repair_date=:rd, accept_date=:ad,
-                    committee=:cm, center_name=:cn, note=:note,
-                    total_qty=:tq, subtotal=:sub, vat=:vat, grand_total=:gt
-                WHERE id=:id
-            """), {
-                "car":car_id, "rd":repair_date, "ad":accept_date,
-                "cm":committee, "cn":center or "", "note":note or "",
-                "tq":total_qty, "sub":subtotal, "vat":vat, "gt":total,
-                "id":int(order_id)
-            })
-            # replace items
-            conn.execute(text("DELETE FROM maintenance_items WHERE order_id=:i"), {"i": int(order_id)})
-            for i, row in items_df.reset_index(drop=True).iterrows():
-                conn.execute(text("""
-                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
-                    VALUES (:oid, :no, :desc, :q, :up, :amt)
-                """), {"oid": int(order_id), "no": i+1, "desc": row.get("description",""),
-                       "q": int(row.get("qty") or 0), "up": float(row.get("unit_price") or 0.0),
-                       "amt": float(row.get("amount") or 0.0)})
-        else:
-            # insert header
-            res = conn.execute(text("""
-                INSERT INTO maintenance_orders
-                  (car_id, repair_date, accept_date, committee, center_name, note,
-                   total_qty, subtotal, vat, grand_total)
-                VALUES (:car, :rd, :ad, :cm, :cn, :note, :tq, :sub, :vat, :gt)
-            """), {"car":car_id, "rd":repair_date, "ad":accept_date, "cm":committee,
-                   "cn":center or "", "note":note or "", "tq":total_qty,
-                   "sub":subtotal, "vat":vat, "gt":total})
-            new_id = res.lastrowid
-            for i, row in items_df.reset_index(drop=True).iterrows():
-                conn.execute(text("""
-                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
-                    VALUES (:oid, :no, :desc, :q, :up, :amt)
-                """), {"oid": int(new_id), "no": i+1, "desc": row.get("description",""),
-                       "q": int(row.get("qty") or 0), "up": float(row.get("unit_price") or 0.0),
-                       "amt": float(row.get("amount") or 0.0)})
-
-    orders = fetch_orders_df()
-    return orders.to_dict("records"), orders.to_dict("records"), "บันทึกเรียบร้อย"
 
 # แนบ/โหลด PDF
 @callback(
@@ -532,3 +462,117 @@ def export_items_csv(n, rows, order_id):
     return dcc.send_data_frame(
         df.to_csv, filename, index=False, encoding="utf-8-sig", lineterminator="\r\n"
     )
+@callback(
+    Output("sel-car","value", allow_duplicate=True),
+    Output("date-repair","date", allow_duplicate=True),
+    Output("date-accept","date", allow_duplicate=True),
+    Output("in-center","value", allow_duplicate=True),
+    Output("sel-committee","value", allow_duplicate=True),
+    Output("in-note","value", allow_duplicate=True),
+    Output("tbl-items","data", allow_duplicate=True),
+    Output("maint-items-store","data", allow_duplicate=True),
+    Output("maint-current-order-id","data", allow_duplicate=True),
+    Input("tbl-orders","derived_virtual_selected_rows"),
+    State("tbl-orders","derived_virtual_data"),
+    prevent_initial_call=True
+)
+def load_order(sel_rows, vdata):
+    if not sel_rows: return no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update, no_update
+    idx = sel_rows[0]
+    order = vdata[idx]
+    header = q("SELECT * FROM maintenance_orders WHERE id=:i", {"i": order["id"]}).mappings().first()
+    items_df = fetch_items_df(order["id"])
+    committee_ids = _fetch_committee_ids(order["id"])        # <<=== ใช้ id
+    return (header["car_id"], header["repair_date"], header["accept_date"], header["center_name"],
+            committee_ids, header["note"] or "",
+            items_df.to_dict("records"), items_df.to_dict("records"), order["id"])
+
+@callback(
+    Output("tbl-orders","data", allow_duplicate=True),
+    Output("orders-store","data", allow_duplicate=True),
+    Output("msg_maint","children", allow_duplicate=True),
+    Input("btn-save","n_clicks"),
+    State("maint-current-order-id","data"),
+    State("sel-car","value"),
+    State("date-repair","date"),
+    State("date-accept","date"),
+    State("in-center","value"),
+    State("sel-committee","value"),      # << list[int] ของ user_id
+    State("in-note","value"),
+    State("maint-items-store","data"),
+    prevent_initial_call=True
+)
+def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_ids, note, items_rows):
+    if not n:
+        return no_update, no_update, ""
+    if not car_id:
+        return no_update, no_update, "กรุณาเลือกทะเบียนรถ"
+
+    items_df = pd.DataFrame(items_rows or [])
+    items_df["qty"] = pd.to_numeric(items_df["qty"], errors="coerce").fillna(0).astype(int)
+    items_df["unit_price"] = pd.to_numeric(items_df["unit_price"], errors="coerce").fillna(0.0)
+    items_df["amount"] = (items_df["qty"] * items_df["unit_price"]).round(2)
+    total_qty = int(items_df["qty"].sum())
+    subtotal = float(items_df["amount"].sum())
+    vat = round(subtotal * 0.07, 2)
+    total = round(subtotal + vat, 2)
+
+    with db_engine.begin() as conn:
+        if order_id:
+            # UPDATE header
+            conn.execute(text("""
+                UPDATE maintenance_orders SET
+                    car_id=:car, repair_date=:rd, accept_date=:ad,
+                    center_name=:cn, note=:note,
+                    total_qty=:tq, subtotal=:sub, vat=:vat, grand_total=:gt
+                WHERE id=:id
+            """), {"car":car_id, "rd":repair_date, "ad":accept_date,
+                   "cn":center or "", "note":note or "",
+                   "tq":total_qty, "sub":subtotal, "vat":vat, "gt":total,
+                   "id": int(order_id)})
+
+            # REPLACE items
+            conn.execute(text("DELETE FROM maintenance_items WHERE order_id=:i"), {"i": int(order_id)})
+            for i, row in items_df.reset_index(drop=True).iterrows():
+                conn.execute(text("""
+                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
+                    VALUES (:oid, :no, :desc, :q, :up, :amt)
+                """), {"oid": int(order_id), "no": i+1,
+                       "desc": row.get("description",""),
+                       "q": int(row.get("qty") or 0),
+                       "up": float(row.get("unit_price") or 0.0),
+                       "amt": float(row.get("amount") or 0.0)})
+
+            # UPDATE committee (ในทรานแซกชันเดียวกัน)
+            _upsert_committee(conn, int(order_id), [int(x) for x in (committee_ids or [])])
+
+        else:
+            # INSERT header
+            res = conn.execute(text("""
+                INSERT INTO maintenance_orders
+                    (car_id, repair_date, accept_date, center_name, note,
+                     total_qty, subtotal, vat, grand_total)
+                VALUES (:car, :rd, :ad, :cn, :note, :tq, :sub, :vat, :gt)
+            """), {"car":car_id, "rd":repair_date, "ad":accept_date,
+                   "cn":center or "", "note":note or "",
+                   "tq":total_qty, "sub":subtotal, "vat":vat, "gt":total})
+            new_id = int(res.lastrowid)
+
+            for i, row in items_df.reset_index(drop=True).iterrows():
+                conn.execute(text("""
+                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
+                    VALUES (:oid, :no, :desc, :q, :up, :amt)
+                """), {"oid": new_id, "no": i+1,
+                       "desc": row.get("description",""),
+                       "q": int(row.get("qty") or 0),
+                       "up": float(row.get("unit_price") or 0.0),
+                       "amt": float(row.get("amount") or 0.0)})
+
+            # INSERT committee
+            _upsert_committee(conn, new_id, [int(x) for x in (committee_ids or [])])
+
+    orders = fetch_orders_df()
+    return orders.to_dict("records"), orders.to_dict("records"), "บันทึกเรียบร้อย"
+
+
+    
