@@ -1,0 +1,17 @@
+python 3.11.13
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+dash
+dash-bootstrap-components
+plotly
+alembic
+python-dotenv
+pandas
+
+
+conda install -c anaconda sqlite
+sqlite3 --version
+sqlite3 fleet.db
+.schema usage_logs
