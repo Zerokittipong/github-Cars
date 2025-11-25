@@ -19,7 +19,7 @@ app.layout = html.Div([
         dcc.Link("Usage", href="/usage"), " | ",
         dcc.Link("Users", href="/users"), " | ",
         dcc.Link("Maintenance", href="/maintenance")," | ",
-        dcc.Link("Carlendar", href="/carlendar")
+        dcc.Link("Calendar", href="/carlendar")
 
     ]),
     html.Hr(),
