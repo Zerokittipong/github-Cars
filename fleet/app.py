@@ -18,7 +18,9 @@ app.layout = html.Div([
         dcc.Link("Cars", href="/cars"), " | ",
         dcc.Link("Usage", href="/usage"), " | ",
         dcc.Link("Users", href="/users"), " | ",
-        dcc.Link("Maintenance", href="/maintenance"),
+        dcc.Link("Maintenance", href="/maintenance")," | ",
+        dcc.Link("Carlendar", href="/carlendar")
+
     ]),
     html.Hr(),
     dash.page_container,

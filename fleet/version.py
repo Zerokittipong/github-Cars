@@ -1,5 +1,7 @@
-__version__ = "6.3"
+__version__ = "0.6.4"
+
 
 # version 0.6.1 Update dash page 5 kpi
 # version 0.6.2 Update dash page, Fixed the issue where the update_dashboard(...) callback didn't return a value to create a dash graph and fix call back real data from usage log to dash
 #version 6.3 fixed miantenance realtime and  dropdown 
+#version 0.6.4 Update carlendar page, cut vat, add ฝบท 

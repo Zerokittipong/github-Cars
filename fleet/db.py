@@ -202,6 +202,22 @@ def backfill_committees_from_legacy():
                 [{"oid": o["id"], "uid": uid} for uid in uids]
             )
 
+
+def init_carlendar():
+    with engine.begin() as conn:
+        conn.execute(text("""
+    CREATE TABLE IF NOT EXISTS car_calendar (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        car_id       INTEGER NOT NULL,     -- FK ไปที่ cars.id
+        start_date   DATE NOT NULL,        -- วันที่เริ่มใช้รถ
+        end_date     DATE NOT NULL,        -- วันที่สิ้นสุดการใช้รถ
+        user_name    TEXT NOT NULL,        -- ชื่อผู้ใช้รถ
+        note         TEXT,
+        created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(car_id) REFERENCES cars(id) ON DELETE CASCADE
+    );
+"""))
+
 def init_db():
     # ถ้ามี ORM models อื่น ๆ ก็ import เพื่อ create_all ได้ แต่ไม่บังคับ
     try:
@@ -214,6 +230,7 @@ def init_db():
     init_cars_table()
     init_usage_logs_table()
     init_maintenance_tables()
+    init_carlendar()
 
 def install_usage_triggers():
     with engine.begin() as conn:

@@ -152,7 +152,7 @@ def layout():
                     [
                         html.Button("🆕 ใบงานใหม่", id="btn-new"),
                         html.Button("💾 บันทึกใบงาน", id="btn-save"),
-                        html.Button("⬇️ Export CSV", id="btn-export"),
+                        html.Button("⬇️ Export ประวัติรถ(xlsx)", id="btn-export"),
                         html.Button("⬇️ ดาวน์โหลด PDF", id="btn-download-pdf"),
                         html.Span(id="msg_maint", style={"marginLeft":"10px","color":"crimson"}),
                     ],
@@ -204,7 +204,7 @@ def layout():
         html.Div(
             [
                 html.Button("➕ เพิ่มรายการ", id="btn-add-item", style={"marginRight":"6px"}),
-                html.Button("Export รายการ (CSV)", id="btn-export-items", style={"marginRight":"10px"}),
+                html.Button("Export รายการ ซ่อม/อะไหล่", id="btn-export-items", style={"marginRight":"10px"}),
                 html.Div(id="totals-box", style={"display":"inline-block","marginLeft":"12px","fontWeight":"600"}),
                 html.Span(id="msg_items", style={"marginLeft":"10px","color":"#2b6"}),
             ],
@@ -302,15 +302,17 @@ def add_item(n, rows):
 def recalc(rows):
     df = pd.DataFrame(rows or [])
     if df.empty:
-        return rows, rows, "รวมแถว: 0 | Subtotal: 0.00 | VAT: 0.00 | Total: 0.00"
+        return rows, rows, "รวมแถว: 0 | Subtotal: 0.00 | Total: 0.00"
+
     df["qty"] = pd.to_numeric(df["qty"], errors="coerce").fillna(0).astype(int)
     df["unit_price"] = pd.to_numeric(df["unit_price"], errors="coerce").fillna(0.0)
     df["amount"] = (df["qty"] * df["unit_price"]).round(2)
+
     total_qty = int(df["qty"].sum())
     subtotal = float(df["amount"].sum())
-    vat = round(subtotal * 0.07, 2)  # ปรับอัตราได้
-    total = round(subtotal + vat, 2)
-    txt = f"รวมแถว: {total_qty} | Subtotal: {subtotal:,.2f} | VAT: {vat:,.2f} | Total: {total:,.2f}"
+    total = subtotal  # ไม่คิด VAT แล้ว
+
+    txt = f"รวมแถว: {total_qty} | Subtotal: {subtotal:,.2f} | Total: {total:,.2f}"
     return df.to_dict("records"), df.to_dict("records"), txt
 
 # บันทึกใบงาน
@@ -359,7 +361,13 @@ def download_pdf(n, order_id):
 )
 def export_orders(n):
     df = fetch_orders_df().drop(columns=["has_pdf"])
-    return dcc.send_data_frame(df.to_csv, "maintenance_orders.csv", index=False, encoding="utf-8-sig", lineterminator="\r\n")
+    # ส่งออกเป็น Excel แทน CSV
+    return dcc.send_data_frame(
+        df.to_excel,
+        "maintenance_orders.xlsx",
+        index=False,
+        sheet_name="Orders"
+    )
 
 # ใบงานใหม่ = เคลียร์ฟอร์ม+ตาราง
 @callback(
@@ -429,10 +437,7 @@ def clear_search(n, orders_full):
     State("maint-current-order-id", "data"),
     prevent_initial_call=True
 )
-def export_items_csv(n, rows, order_id):
-    
-
-    # ไม่มีข้อมูลก็ไม่ทำอะไร
+def export_items_excel(n, rows, order_id):
     if not n or rows is None:
         return dash.no_update
 
@@ -440,14 +445,13 @@ def export_items_csv(n, rows, order_id):
     if df.empty:
         return dash.no_update
 
-    # จัดลำดับคอลัมน์ให้อ่านง่าย
     cols = ["item_no", "description", "qty", "unit_price", "amount"]
     df = df.reindex(columns=[c for c in cols if c in df.columns])
 
-    # ตั้งชื่อไฟล์ให้รู้ว่าเป็นของใบงานไหน
-    filename = "maintenance_items.csv"
+    filename = "maintenance_items.xlsx"
+    sheet_name = "Items"
+
     if order_id:
-        # ลองหาทะเบียนเพื่อใส่ในชื่อไฟล์ (ถ้าเจอ)
         with db_engine.begin() as conn:
             row = conn.execute(text("""
                 SELECT c.plate
@@ -456,12 +460,15 @@ def export_items_csv(n, rows, order_id):
                 WHERE o.id = :i
             """), {"i": int(order_id)}).first()
         plate = (row[0] if row else "").replace(" ", "_")
-        filename = f"maint_{plate or 'order'}_{order_id}_items.csv"
+        filename = f"maint_{plate or 'order'}_{order_id}_items.xlsx"
 
-    # ส่งออก CSV (UTF-8 SIG เพื่อให้ Excel เปิดแล้วภาษาไทยไม่เพี้ยน)
     return dcc.send_data_frame(
-        df.to_csv, filename, index=False, encoding="utf-8-sig", lineterminator="\r\n"
+        df.to_excel,
+        filename,
+        index=False,
+        sheet_name=sheet_name
     )
+
 @callback(
     Output("sel-car","value", allow_duplicate=True),
     Output("date-repair","date", allow_duplicate=True),
@@ -497,25 +504,35 @@ def load_order(sel_rows, vdata):
     State("date-repair","date"),
     State("date-accept","date"),
     State("in-center","value"),
-    State("sel-committee","value"),      # << list[int] ของ user_id
+    State("sel-committee","value"),      # list[int] ของ user_id
     State("in-note","value"),
     State("maint-items-store","data"),
     prevent_initial_call=True
 )
-def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_ids, note, items_rows):
+def save_order(n, order_id, car_id, repair_date, accept_date,
+               center, committee_ids, note, items_rows):
     if not n:
         return no_update, no_update, ""
     if not car_id:
         return no_update, no_update, "กรุณาเลือกทะเบียนรถ"
 
     items_df = pd.DataFrame(items_rows or [])
-    items_df["qty"] = pd.to_numeric(items_df["qty"], errors="coerce").fillna(0).astype(int)
-    items_df["unit_price"] = pd.to_numeric(items_df["unit_price"], errors="coerce").fillna(0.0)
-    items_df["amount"] = (items_df["qty"] * items_df["unit_price"]).round(2)
-    total_qty = int(items_df["qty"].sum())
-    subtotal = float(items_df["amount"].sum())
-    vat = round(subtotal * 0.07, 2)
-    total = round(subtotal + vat, 2)
+
+    # --- กรณีไม่มีรายการซ่อมเลย ---
+    if items_df.empty:
+        total_qty = 0
+        subtotal = 0.0
+        vat = 0.0
+        total = 0.0
+    else:
+        items_df["qty"] = pd.to_numeric(items_df["qty"], errors="coerce").fillna(0).astype(int)
+        items_df["unit_price"] = pd.to_numeric(items_df["unit_price"], errors="coerce").fillna(0.0)
+        items_df["amount"] = (items_df["qty"] * items_df["unit_price"]).round(2)
+
+        total_qty = int(items_df["qty"].sum())
+        subtotal = float(items_df["amount"].sum())
+        vat = 0.0
+        total = subtotal
 
     with db_engine.begin() as conn:
         if order_id:
@@ -531,11 +548,13 @@ def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_
                    "tq":total_qty, "sub":subtotal, "vat":vat, "gt":total,
                    "id": int(order_id)})
 
-            # REPLACE items
-            conn.execute(text("DELETE FROM maintenance_items WHERE order_id=:i"), {"i": int(order_id)})
+            # ลบรายการเก่าแล้วแทรกรายการใหม่ (ถ้ามี)
+            conn.execute(text("DELETE FROM maintenance_items WHERE order_id=:i"),
+                         {"i": int(order_id)})
             for i, row in items_df.reset_index(drop=True).iterrows():
                 conn.execute(text("""
-                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
+                    INSERT INTO maintenance_items
+                        (order_id, item_no, description, qty, unit_price, amount)
                     VALUES (:oid, :no, :desc, :q, :up, :amt)
                 """), {"oid": int(order_id), "no": i+1,
                        "desc": row.get("description",""),
@@ -543,11 +562,11 @@ def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_
                        "up": float(row.get("unit_price") or 0.0),
                        "amt": float(row.get("amount") or 0.0)})
 
-            # UPDATE committee (ในทรานแซกชันเดียวกัน)
-            _upsert_committee(conn, int(order_id), [int(x) for x in (committee_ids or [])])
+            _upsert_committee(conn, int(order_id),
+                              [int(x) for x in (committee_ids or [])])
 
         else:
-            # INSERT header
+            # INSERT header ใหม่
             res = conn.execute(text("""
                 INSERT INTO maintenance_orders
                     (car_id, repair_date, accept_date, center_name, note,
@@ -560,7 +579,8 @@ def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_
 
             for i, row in items_df.reset_index(drop=True).iterrows():
                 conn.execute(text("""
-                    INSERT INTO maintenance_items (order_id, item_no, description, qty, unit_price, amount)
+                    INSERT INTO maintenance_items
+                        (order_id, item_no, description, qty, unit_price, amount)
                     VALUES (:oid, :no, :desc, :q, :up, :amt)
                 """), {"oid": new_id, "no": i+1,
                        "desc": row.get("description",""),
@@ -568,11 +588,12 @@ def save_order(n, order_id, car_id, repair_date, accept_date, center, committee_
                        "up": float(row.get("unit_price") or 0.0),
                        "amt": float(row.get("amount") or 0.0)})
 
-            # INSERT committee
-            _upsert_committee(conn, new_id, [int(x) for x in (committee_ids or [])])
+            _upsert_committee(conn, new_id,
+                              [int(x) for x in (committee_ids or [])])
 
     orders = fetch_orders_df()
     return orders.to_dict("records"), orders.to_dict("records"), "บันทึกเรียบร้อย"
+
 
 
     
