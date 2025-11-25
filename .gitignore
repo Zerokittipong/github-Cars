@@ -4,6 +4,8 @@
 # Python cache files
 __pycache__/
 **/__pycache__/
+
+# Python cache
 *.pyc
 
 # Virtual environments
@@ -16,5 +18,7 @@ dash/
 # Database files (local only)
 *.db
 
-# Upload folders (ถ้ามีไฟล์ที่ไม่ต้องการแชร์)
+
+# Database and uploads
+*.db
 uploads/
